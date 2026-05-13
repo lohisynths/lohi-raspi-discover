@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import concurrent.futures
 import ipaddress
 import platform
@@ -114,13 +115,48 @@ def resolve_hostname(name: str) -> list[str]:
     try:
         infos = socket.getaddrinfo(name, None, family=socket.AF_INET, type=socket.SOCK_STREAM)
     except socket.gaierror:
-        return []
+        return _resolve_hostname_platform_fallback(name)
 
     ips = []
     for info in infos:
         ip = info[4][0]
         if ip not in ips:
             ips.append(ip)
+    return ips
+
+
+def _resolve_hostname_platform_fallback(name: str) -> list[str]:
+    if platform.system().lower() != "windows":
+        return []
+
+    encoded_name = base64.b64encode(name.encode("utf-8")).decode("ascii")
+    script = "\n".join(
+        [
+            f"$NameBytes = [Convert]::FromBase64String('{encoded_name}')",
+            "$Name = [Text.Encoding]::UTF8.GetString($NameBytes)",
+            "$ErrorActionPreference = 'SilentlyContinue'",
+            "Resolve-DnsName -Name $Name -Type A | Select-Object -ExpandProperty IPAddress",
+        ]
+    )
+    encoded_script = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    output = _run_command(
+        [
+            "powershell",
+            "-NoProfile",
+            "-EncodedCommand",
+            encoded_script,
+        ],
+        timeout=6,
+    )
+    ips: list[str] = []
+    for line in output.splitlines():
+        candidate = line.strip()
+        try:
+            ipaddress.IPv4Address(candidate)
+        except ValueError:
+            continue
+        if candidate not in ips:
+            ips.append(candidate)
     return ips
 
 
@@ -176,9 +212,11 @@ def normalize_networks(cli_networks: list[str] | None) -> list[ipaddress.IPv4Net
 
 
 def probe_ssh(ip: str, timeout: float) -> bool:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.settimeout(timeout)
-        return sock.connect_ex((ip, SSH_PORT)) == 0
+    try:
+        with socket.create_connection((ip, SSH_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def lookup_reverse_dns(ip: str) -> str | None:
@@ -200,14 +238,14 @@ def load_neighbor_cache() -> dict[str, str]:
     return {}
 
 
-def _run_command(command: list[str]) -> str:
+def _run_command(command: list[str], timeout: float = 2) -> str:
     try:
         result = subprocess.run(
             command,
             check=False,
             capture_output=True,
             text=True,
-            timeout=2,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired):
         return ""
@@ -498,7 +536,7 @@ def _direct_hostname_results(
             if key in seen:
                 continue
             seen.add(key)
-            ssh_open = probe_ssh(ip, timeout)
+            ssh_open = probe_ssh(ip, timeout) or probe_ssh(hostname, timeout)
             reverse_name = lookup_reverse_dns(ip)
             results.append(
                 HostResult(

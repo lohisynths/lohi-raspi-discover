@@ -36,6 +36,8 @@ from discover_pi import (
 )
 from raspi_deploy_lib import SSH_TIMEOUT, UPLOAD_DIRECTORY, upload_file, verify_connection
 
+SSH_TARGET_ROLE = Qt.UserRole + 1
+
 
 class DiscoveryWorker(QThread):
     progress = Signal(object)
@@ -232,6 +234,8 @@ class DiscoveryWindow(QMainWindow):
             ]
             for column, value in enumerate(values):
                 item = QTableWidgetItem(value)
+                if column == 0:
+                    item.setData(SSH_TARGET_ROLE, _ssh_target_for_host(host))
                 if column == 4:
                     item.setForeground(_confidence_color(result.confidence))
                 self.results_table.setItem(row, column, item)
@@ -249,15 +253,17 @@ class DiscoveryWindow(QMainWindow):
             f"across {network_count} networks."
         )
 
-    def selected_ip(self) -> str | None:
+    def selected_ssh_target(self) -> str | None:
         rows = self.results_table.selectionModel().selectedRows()
         if not rows:
             return None
         item = self.results_table.item(rows[0].row(), 0)
-        return item.text() if item else None
+        if item is None:
+            return None
+        return item.data(SSH_TARGET_ROLE) or item.text()
 
     def update_action_state(self) -> None:
-        has_selection = self.selected_ip() is not None
+        has_selection = self.selected_ssh_target() is not None
         idle = self.worker is None and self.ssh_worker is None
         self.verify_button.setEnabled(has_selection and idle)
         self.select_file_button.setEnabled(has_selection and idle)
@@ -266,10 +272,10 @@ class DiscoveryWindow(QMainWindow):
         )
 
     def verify_connection(self) -> None:
-        ip = self.selected_ip()
-        if ip is None:
+        target = self.selected_ssh_target()
+        if target is None:
             return
-        self.run_ssh_worker(ip)
+        self.run_ssh_worker(target)
 
     def select_file(self) -> None:
         file_path, _ = QFileDialog.getOpenFileName(self, "Select File To Upload")
@@ -280,19 +286,19 @@ class DiscoveryWindow(QMainWindow):
         self.update_action_state()
 
     def upload_file(self) -> None:
-        ip = self.selected_ip()
-        if ip is None or self.selected_file is None:
+        target = self.selected_ssh_target()
+        if target is None or self.selected_file is None:
             return
-        self.run_ssh_worker(ip, self.selected_file)
+        self.run_ssh_worker(target, self.selected_file)
 
-    def run_ssh_worker(self, ip: str, file_path: str | None = None) -> None:
+    def run_ssh_worker(self, target: str, file_path: str | None = None) -> None:
         action = "Uploading file" if file_path else "Verifying SSH connection"
-        self.status_label.setText(f"{action} for {ip}")
+        self.status_label.setText(f"{action} for {target}")
         self.footer_label.setText(
             f"Using SSH user pi and password authentication with a {SSH_TIMEOUT:g}s timeout."
         )
         self.progress_bar.setRange(0, 0)
-        self.ssh_worker = SshWorker(ip, file_path)
+        self.ssh_worker = SshWorker(target, file_path)
         self.ssh_worker.finished.connect(self.handle_ssh_finished)
         self.ssh_worker.failed.connect(self.handle_ssh_failed)
         self.update_action_state()
@@ -319,6 +325,10 @@ class DiscoveryWindow(QMainWindow):
 
 def _visible_results(summary: DiscoverySummary) -> list:
     return [result for result in summary.results if result.score > 0]
+
+
+def _ssh_target_for_host(host) -> str:
+    return host.resolved_from or host.hostname or host.ip
 
 
 def _confidence_color(confidence: str) -> QColor:
