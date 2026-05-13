@@ -1,2 +1,3 @@
 psutil
 PySide6-Essentials
+paramiko

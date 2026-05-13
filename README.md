@@ -63,6 +63,20 @@ Tune scan behavior:
 python discover_pi.py --timeout 0.4 --workers 128
 ```
 
+## Upload CLI
+
+Verify SSH access to a discovered Raspberry Pi:
+
+```bash
+python raspi_deploy.py --host 10.42.0.163 --verify
+```
+
+Upload a file to `/home/pi` and preserve its permission bits:
+
+```bash
+python raspi_deploy.py --host 10.42.0.163 --upload ./my-script.sh
+```
+
 ## GUI Usage
 
 Run the graphical application:
@@ -74,6 +88,13 @@ python discover_pi_gui.py
 Click `Discover` to scan the network. The progress bar advances as hosts are
 checked, and the results table lists Raspberry Pi candidates with IP, hostname,
 MAC address, SSH reachability, confidence, and evidence.
+
+Select a Raspberry Pi in the table to enable SSH actions:
+
+- `Verify Connection` checks SSH login as user `pi` with password `raspberry`.
+- `Select File` chooses a local file.
+- `Upload` copies the selected file to `/home/pi` on the selected Raspberry Pi.
+  The upload also applies the local file permission bits to the remote file.
 
 ## Build A Binary
 
@@ -95,11 +116,18 @@ Create the GUI single-file executable:
 pyinstaller raspi-discover-gui.spec
 ```
 
+Create the upload CLI single-file executable:
+
+```bash
+pyinstaller raspi-deploy.spec
+```
+
 The binaries are written to:
 
 ```text
 dist/raspi-discover
 dist/raspi-discover-gui
+dist/raspi-deploy
 ```
 
 Run them with:
@@ -107,6 +135,7 @@ Run them with:
 ```bash
 ./dist/raspi-discover
 ./dist/raspi-discover-gui
+./dist/raspi-deploy --host 10.42.0.163 --verify
 ```
 
 PyInstaller builds are platform-specific. Build on Windows to create a Windows

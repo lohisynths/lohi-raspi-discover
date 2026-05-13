@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QGridLayout,
     QHeaderView,
     QLabel,
+    QFileDialog,
     QMainWindow,
     QMessageBox,
     QProgressBar,
@@ -33,6 +34,7 @@ from discover_pi import (
     DiscoverySummary,
     discover,
 )
+from raspi_deploy_lib import UPLOAD_DIRECTORY, upload_file, verify_connection
 
 
 class DiscoveryWorker(QThread):
@@ -60,12 +62,39 @@ class DiscoveryWorker(QThread):
         self.finished.emit(summary)
 
 
+class SshWorker(QThread):
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, ip: str, file_path: str | None = None) -> None:
+        super().__init__()
+        self.ip = ip
+        self.file_path = file_path
+
+    def run(self) -> None:
+        try:
+            if self.file_path is None:
+                verify_connection(self.ip)
+                self.finished.emit(f"SSH connection verified for {self.ip}.")
+            else:
+                result = upload_file(self.ip, self.file_path)
+                self.finished.emit(
+                    f"Uploaded {result.local_path.name} to {self.ip}:{result.remote_path} "
+                    f"with mode {result.mode:o}."
+                )
+        except Exception as exc:  # pragma: no cover - network/UI error path
+            detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            self.failed.emit(detail)
+
+
 class DiscoveryWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.worker: DiscoveryWorker | None = None
+        self.ssh_worker: SshWorker | None = None
+        self.selected_file: str | None = None
         self.setWindowTitle("Raspberry Pi Discovery")
-        self.resize(720, 420)
+        self.resize(820, 520)
 
         root = QWidget()
         self.setCentralWidget(root)
@@ -100,6 +129,7 @@ class DiscoveryWindow(QMainWindow):
         self.results_table.setSelectionBehavior(QTableWidget.SelectRows)
         self.results_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.results_table.verticalHeader().setVisible(False)
+        self.results_table.itemSelectionChanged.connect(self.update_action_state)
         header = self.results_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.Stretch)
@@ -109,9 +139,32 @@ class DiscoveryWindow(QMainWindow):
         header.setSectionResizeMode(5, QHeaderView.Stretch)
         layout.addWidget(self.results_table, 3, 0, 1, 2)
 
+        self.verify_button = QPushButton("Verify Connection")
+        self.verify_button.clicked.connect(self.verify_connection)
+        self.verify_button.setEnabled(False)
+
+        self.select_file_button = QPushButton("Select File")
+        self.select_file_button.clicked.connect(self.select_file)
+        self.select_file_button.setEnabled(False)
+
+        self.upload_button = QPushButton("Upload")
+        self.upload_button.clicked.connect(self.upload_file)
+        self.upload_button.setEnabled(False)
+
+        self.file_label = QLabel("No file selected.")
+        self.file_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        action_layout = QGridLayout()
+        action_layout.addWidget(self.verify_button, 0, 0)
+        action_layout.addWidget(self.select_file_button, 0, 1)
+        action_layout.addWidget(self.upload_button, 0, 2)
+        action_layout.addWidget(self.file_label, 1, 0, 1, 3)
+        action_layout.setColumnStretch(2, 1)
+        layout.addLayout(action_layout, 4, 0, 1, 2)
+
         self.footer_label = QLabel("No scan has run yet.")
         self.footer_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        layout.addWidget(self.footer_label, 4, 0, 1, 2)
+        layout.addWidget(self.footer_label, 5, 0, 1, 2)
 
         layout.setColumnStretch(0, 1)
         layout.setRowStretch(3, 1)
@@ -121,6 +174,8 @@ class DiscoveryWindow(QMainWindow):
         self.footer_label.setText("Discovery in progress.")
         self.status_label.setText("Starting discovery")
         self.progress_bar.setRange(0, 0)
+        self.selected_file = None
+        self.file_label.setText("No file selected.")
         self.set_inputs_enabled(False)
 
         self.worker = DiscoveryWorker()
@@ -145,6 +200,7 @@ class DiscoveryWindow(QMainWindow):
         self.footer_label.setText(self.summary_text(summary))
         self.set_inputs_enabled(True)
         self.worker = None
+        self.update_action_state()
 
     def handle_failed(self, message: str) -> None:
         self.progress_bar.setRange(0, 100)
@@ -153,10 +209,13 @@ class DiscoveryWindow(QMainWindow):
         self.footer_label.setText(message)
         self.set_inputs_enabled(True)
         self.worker = None
+        self.update_action_state()
         QMessageBox.critical(self, "Discovery failed", message)
 
     def set_inputs_enabled(self, enabled: bool) -> None:
         self.discover_button.setEnabled(enabled)
+        self.results_table.setEnabled(enabled)
+        self.update_action_state()
 
     def populate_results(self, summary: DiscoverySummary) -> None:
         visible = _visible_results(summary)
@@ -177,6 +236,7 @@ class DiscoveryWindow(QMainWindow):
                     item.setForeground(_confidence_color(result.confidence))
                 self.results_table.setItem(row, column, item)
         self.results_table.resizeRowsToContents()
+        self.update_action_state()
 
     def summary_text(self, summary: DiscoverySummary) -> str:
         visible = _visible_results(summary)
@@ -188,6 +248,71 @@ class DiscoveryWindow(QMainWindow):
             f"{subject}. Scanned {summary.scanned_hosts} hosts "
             f"across {network_count} networks."
         )
+
+    def selected_ip(self) -> str | None:
+        rows = self.results_table.selectionModel().selectedRows()
+        if not rows:
+            return None
+        item = self.results_table.item(rows[0].row(), 0)
+        return item.text() if item else None
+
+    def update_action_state(self) -> None:
+        has_selection = self.selected_ip() is not None
+        idle = self.worker is None and self.ssh_worker is None
+        self.verify_button.setEnabled(has_selection and idle)
+        self.select_file_button.setEnabled(has_selection and idle)
+        self.upload_button.setEnabled(
+            has_selection and idle and self.selected_file is not None
+        )
+
+    def verify_connection(self) -> None:
+        ip = self.selected_ip()
+        if ip is None:
+            return
+        self.run_ssh_worker(ip)
+
+    def select_file(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select File To Upload")
+        if not file_path:
+            return
+        self.selected_file = file_path
+        self.file_label.setText(file_path)
+        self.update_action_state()
+
+    def upload_file(self) -> None:
+        ip = self.selected_ip()
+        if ip is None or self.selected_file is None:
+            return
+        self.run_ssh_worker(ip, self.selected_file)
+
+    def run_ssh_worker(self, ip: str, file_path: str | None = None) -> None:
+        action = "Uploading file" if file_path else "Verifying SSH connection"
+        self.status_label.setText(f"{action} for {ip}")
+        self.footer_label.setText("Using SSH user pi and password authentication.")
+        self.progress_bar.setRange(0, 0)
+        self.ssh_worker = SshWorker(ip, file_path)
+        self.ssh_worker.finished.connect(self.handle_ssh_finished)
+        self.ssh_worker.failed.connect(self.handle_ssh_failed)
+        self.update_action_state()
+        self.ssh_worker.start()
+
+    def handle_ssh_finished(self, message: str) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(100)
+        self.status_label.setText("Done")
+        self.footer_label.setText(message)
+        self.ssh_worker = None
+        self.update_action_state()
+        QMessageBox.information(self, "Raspberry Pi Discovery", message)
+
+    def handle_ssh_failed(self, message: str) -> None:
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        self.status_label.setText("SSH operation failed")
+        self.footer_label.setText(message)
+        self.ssh_worker = None
+        self.update_action_state()
+        QMessageBox.critical(self, "SSH operation failed", message)
 
 
 def _visible_results(summary: DiscoverySummary) -> list:
