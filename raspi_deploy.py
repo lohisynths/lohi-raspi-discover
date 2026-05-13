@@ -8,6 +8,7 @@ import sys
 
 from raspi_deploy_lib import (
     SSH_PASSWORD,
+    SSH_TIMEOUT,
     SSH_USERNAME,
     UPLOAD_DIRECTORY,
     upload_file,
@@ -41,7 +42,12 @@ def parse_args() -> argparse.Namespace:
         default=SSH_PASSWORD,
         help="SSH password (default: raspberry)",
     )
-    parser.add_argument("--timeout", type=float, default=8, help="SSH timeout in seconds")
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=SSH_TIMEOUT,
+        help=f"SSH timeout in seconds (default: {SSH_TIMEOUT:g})",
+    )
     return parser.parse_args()
 
 

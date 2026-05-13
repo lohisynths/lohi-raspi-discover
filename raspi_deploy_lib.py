@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import socket
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -15,6 +17,7 @@ SSH_USERNAME = "pi"
 SSH_PASSWORD = "raspberry"
 UPLOAD_DIRECTORY = "/home/pi"
 SSH_PORT = 22
+SSH_TIMEOUT = 15
 
 
 @dataclass(frozen=True)
@@ -29,7 +32,7 @@ def verify_connection(
     username: str = SSH_USERNAME,
     password: str = SSH_PASSWORD,
     port: int = SSH_PORT,
-    timeout: float = 8,
+    timeout: float = SSH_TIMEOUT,
 ) -> None:
     client = connect_ssh(host, username, password, port, timeout)
     client.close()
@@ -42,7 +45,7 @@ def upload_file(
     username: str = SSH_USERNAME,
     password: str = SSH_PASSWORD,
     port: int = SSH_PORT,
-    timeout: float = 8,
+    timeout: float = SSH_TIMEOUT,
 ) -> UploadResult:
     local_path = Path(file_path)
     if not local_path.is_file():
@@ -67,24 +70,85 @@ def connect_ssh(
     username: str = SSH_USERNAME,
     password: str = SSH_PASSWORD,
     port: int = SSH_PORT,
-    timeout: float = 8,
+    timeout: float = SSH_TIMEOUT,
 ):
     if paramiko is None:
         raise RuntimeError(
             "Missing dependency: paramiko. Install with: python -m pip install -r requirements.txt"
         )
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(
-        host,
-        port=port,
-        username=username,
-        password=password,
-        timeout=timeout,
-        auth_timeout=timeout,
-        banner_timeout=timeout,
-        look_for_keys=False,
-        allow_agent=False,
-    )
+    if not _needs_tcp_preflight():
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                host,
+                port=port,
+                username=username,
+                password=password,
+                timeout=timeout,
+                auth_timeout=timeout,
+                banner_timeout=timeout,
+                look_for_keys=False,
+                allow_agent=False,
+            )
+        except TimeoutError as exc:
+            client.close()
+            raise TimeoutError(
+                f"SSH connection to {host}:{port} timed out after {timeout:g}s. "
+                "Check that this machine is on the same network as the Raspberry Pi, "
+                "that port 22 is reachable, and that the Raspberry Pi SSH service is "
+                "responding."
+            ) from exc
+        except Exception:
+            client.close()
+            raise
+        return client
+
+    sock = _open_tcp_socket(host, port, timeout)
+    try:
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        client.connect(
+            host,
+            port=port,
+            username=username,
+            password=password,
+            timeout=timeout,
+            auth_timeout=timeout,
+            banner_timeout=timeout,
+            look_for_keys=False,
+            allow_agent=False,
+            sock=sock,
+        )
+    except TimeoutError as exc:
+        sock.close()
+        raise TimeoutError(
+            f"Connected to {host}:{port}, but SSH negotiation timed out after "
+            f"{timeout:g}s. Check that the Raspberry Pi SSH service is responding "
+            "and accepts password login for this image."
+        ) from exc
+    except Exception:
+        sock.close()
+        raise
     return client
+
+
+def _needs_tcp_preflight() -> bool:
+    return sys.platform.startswith("win")
+
+
+def _open_tcp_socket(host: str, port: int, timeout: float) -> socket.socket:
+    try:
+        sock = socket.create_connection((host, port), timeout=timeout)
+    except TimeoutError as exc:
+        raise TimeoutError(
+            f"Timed out opening TCP connection to {host}:{port} after {timeout:g}s. "
+            "Check that Windows is on the same network as the Raspberry Pi and that "
+            "port 22 is reachable."
+        ) from exc
+    except OSError as exc:
+        raise ConnectionError(f"Could not connect to {host}:{port}: {exc}") from exc
+
+    sock.settimeout(timeout)
+    return sock

@@ -34,7 +34,7 @@ from discover_pi import (
     DiscoverySummary,
     discover,
 )
-from raspi_deploy_lib import UPLOAD_DIRECTORY, upload_file, verify_connection
+from raspi_deploy_lib import SSH_TIMEOUT, UPLOAD_DIRECTORY, upload_file, verify_connection
 
 
 class DiscoveryWorker(QThread):
@@ -288,7 +288,9 @@ class DiscoveryWindow(QMainWindow):
     def run_ssh_worker(self, ip: str, file_path: str | None = None) -> None:
         action = "Uploading file" if file_path else "Verifying SSH connection"
         self.status_label.setText(f"{action} for {ip}")
-        self.footer_label.setText("Using SSH user pi and password authentication.")
+        self.footer_label.setText(
+            f"Using SSH user pi and password authentication with a {SSH_TIMEOUT:g}s timeout."
+        )
         self.progress_bar.setRange(0, 0)
         self.ssh_worker = SshWorker(ip, file_path)
         self.ssh_worker.finished.connect(self.handle_ssh_finished)
