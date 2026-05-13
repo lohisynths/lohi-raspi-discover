@@ -63,6 +63,32 @@ Tune scan behavior:
 python discover_pi.py --timeout 0.4 --workers 128
 ```
 
+## Build A Binary
+
+Install the runtime and build dependencies in the virtual environment:
+
+```bash
+python -m pip install -r requirements.txt -r requirements-build.txt
+```
+
+Create a single-file executable:
+
+```bash
+pyinstaller --onefile --name raspi-discover discover_pi.py
+```
+
+The binary is written to:
+
+```text
+dist/raspi-discover
+```
+
+Run it with:
+
+```bash
+./dist/raspi-discover
+```
+
 ## How It Identifies The Device
 
 The strongest signal is an exact match for `lohi-bassline-junkie` or

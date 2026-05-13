@@ -381,16 +381,11 @@ def format_results(
     show_all: bool = False,
 ) -> str:
     if not results:
-        lines = ["No matching Raspberry Pi found.", "", "Tried hostnames:"]
-        lines.extend(f"- {name}" for name in tried_hostnames)
-        if scanned_networks:
-            lines.extend(["", "Scanned networks:"])
-            lines.extend(f"- {network}" for network in scanned_networks)
-        return "\n".join(lines)
+        return _format_not_found(tried_hostnames, scanned_networks)
 
     visible = results if show_all else [result for result in results if result.score > 0]
     if not visible:
-        visible = results[:1]
+        return _format_not_found(tried_hostnames, scanned_networks)
 
     best = visible[0]
     if best.confidence == "high" and "hostname" in best.evidence:
@@ -408,7 +403,10 @@ def format_results(
             ]
         )
 
-    title = "Raspberry Pi candidate" if len(visible) == 1 else "Raspberry Pi candidates"
+    if show_all:
+        title = "Responsive hosts"
+    else:
+        title = "Raspberry Pi candidate" if len(visible) == 1 else "Raspberry Pi candidates"
     rows = [
         [
             item.host.ip,
@@ -422,6 +420,18 @@ def format_results(
     ]
     headers = ["IP", "Hostname", "MAC", "Open Ports", "Confidence", "Evidence"]
     return f"{title}\n\n{_format_table(headers, rows)}"
+
+
+def _format_not_found(
+    tried_hostnames: list[str],
+    scanned_networks: list[ipaddress.IPv4Network],
+) -> str:
+    lines = ["No matching Raspberry Pi found.", "", "Tried hostnames:"]
+    lines.extend(f"- {name}" for name in tried_hostnames)
+    if scanned_networks:
+        lines.extend(["", "Scanned networks:"])
+        lines.extend(f"- {network}" for network in scanned_networks)
+    return "\n".join(lines)
 
 
 def _display(value: str | None) -> str:
