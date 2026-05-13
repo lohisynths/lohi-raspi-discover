@@ -63,6 +63,18 @@ Tune scan behavior:
 python discover_pi.py --timeout 0.4 --workers 128
 ```
 
+## GUI Usage
+
+Run the graphical application:
+
+```bash
+python discover_pi_gui.py
+```
+
+Click `Discover` to scan the network. The progress bar advances as hosts are
+checked, and the results table lists Raspberry Pi candidates with IP, hostname,
+MAC address, SSH reachability, confidence, and evidence.
+
 ## Build A Binary
 
 Install the runtime and build dependencies in the virtual environment:
@@ -71,23 +83,34 @@ Install the runtime and build dependencies in the virtual environment:
 python -m pip install -r requirements.txt -r requirements-build.txt
 ```
 
-Create a single-file executable:
+Create the CLI single-file executable:
 
 ```bash
-pyinstaller --onefile --name raspi-discover discover_pi.py
+pyinstaller raspi-discover.spec
 ```
 
-The binary is written to:
+Create the GUI single-file executable:
+
+```bash
+pyinstaller raspi-discover-gui.spec
+```
+
+The binaries are written to:
 
 ```text
 dist/raspi-discover
+dist/raspi-discover-gui
 ```
 
-Run it with:
+Run them with:
 
 ```bash
 ./dist/raspi-discover
+./dist/raspi-discover-gui
 ```
+
+PyInstaller builds are platform-specific. Build on Windows to create a Windows
+binary, on macOS to create a macOS binary, and on Linux to create a Linux binary.
 
 ## How It Identifies The Device
 
@@ -112,3 +135,9 @@ banners or package-specific services.
 - If auto-detection cannot find your local network, pass `--network` explicitly.
 - The scanner uses normal TCP connections only, so it should not need elevated
   privileges.
+- On Linux desktops using Qt's X11 `xcb` backend, the GUI requires the system
+  library `libxcb-cursor.so.0`. Install the package that provides it if the GUI
+  reports an `xcb` platform plugin error:
+  - Debian/Ubuntu: `sudo apt install libxcb-cursor0`
+  - Fedora: `sudo dnf install xcb-util-cursor`
+  - Arch: `sudo pacman -S xcb-util-cursor`

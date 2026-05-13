@@ -12,7 +12,7 @@ import socket
 import subprocess
 import sys
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Callable, Iterable
 
 try:
     import psutil
@@ -47,6 +47,22 @@ class ScoredHost:
     score: int
     confidence: str
     evidence: list[str]
+
+
+@dataclass(frozen=True)
+class DiscoveryProgress:
+    phase: str
+    completed: int
+    total: int
+    message: str
+
+
+@dataclass(frozen=True)
+class DiscoverySummary:
+    tried_hostnames: list[str]
+    scanned_networks: list[ipaddress.IPv4Network]
+    scanned_hosts: int
+    results: list[ScoredHost]
 
 
 def parse_args() -> argparse.Namespace:
@@ -264,7 +280,8 @@ def scan_network(
     networks: Iterable[ipaddress.IPv4Network],
     timeout: float,
     workers: int,
-) -> list[HostResult]:
+    progress_callback: Callable[[DiscoveryProgress], None] | None = None,
+) -> tuple[list[HostResult], int]:
     neighbor_cache = load_neighbor_cache()
     own_ips = _local_ipv4_addresses()
     targets = [
@@ -275,10 +292,11 @@ def scan_network(
     ]
 
     if not targets:
-        return []
+        return [], 0
 
     max_workers = max(1, min(workers, len(targets)))
     results: list[HostResult] = []
+    completed = 0
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(_probe_scan_target, ip, timeout, neighbor_cache): ip
@@ -288,8 +306,21 @@ def scan_network(
             result = future.result()
             if result is not None:
                 results.append(result)
+            completed += 1
+            if progress_callback is not None:
+                progress_callback(
+                    DiscoveryProgress(
+                        phase="Scanning network",
+                        completed=completed,
+                        total=len(targets),
+                        message=f"Scanned {completed} of {len(targets)} hosts",
+                    )
+                )
 
-    return sorted(results, key=lambda item: tuple(int(part) for part in item.ip.split(".")))
+    return (
+        sorted(results, key=lambda item: tuple(int(part) for part in item.ip.split("."))),
+        len(targets),
+    )
 
 
 def _local_ipv4_addresses() -> set[str]:
@@ -501,30 +532,130 @@ def _deduplicate_results(results: list[HostResult]) -> list[HostResult]:
     return list(by_ip.values())
 
 
-def main() -> int:
-    args = parse_args()
-    if args.timeout <= 0:
-        print("--timeout must be greater than zero", file=sys.stderr)
-        return 2
-    if args.workers <= 0:
-        print("--workers must be greater than zero", file=sys.stderr)
-        return 2
+def discover(
+    target_hostname: str = DEFAULT_HOSTNAME,
+    cli_networks: list[str] | None = None,
+    timeout: float = 0.4,
+    workers: int = 128,
+    show_all: bool = False,
+    progress_callback: Callable[[DiscoveryProgress], None] | None = None,
+) -> DiscoverySummary:
+    if timeout <= 0:
+        raise ValueError("timeout must be greater than zero")
+    if workers <= 0:
+        raise ValueError("workers must be greater than zero")
 
-    hostnames = candidate_hostnames(args.hostname)
+    hostnames = candidate_hostnames(target_hostname)
+    _emit_progress(
+        progress_callback,
+        "Resolving hostname",
+        0,
+        0,
+        f"Trying {', '.join(hostnames)}",
+    )
+
     neighbor_cache = load_neighbor_cache()
-    direct_results = _direct_hostname_results(hostnames, args.timeout, neighbor_cache)
+    direct_results = _direct_hostname_results(hostnames, timeout, neighbor_cache)
     direct_scored = sorted(
-        (score_host(result, args.hostname) for result in direct_results),
+        (score_host(result, target_hostname) for result in direct_results),
         key=lambda item: item.score,
         reverse=True,
     )
 
-    if direct_scored and direct_scored[0].confidence == "high" and not args.show_all:
-        print(format_results(direct_scored, args.hostname, hostnames, [], args.show_all))
-        return 0
+    if direct_scored and direct_scored[0].confidence == "high" and not show_all:
+        _emit_progress(
+            progress_callback,
+            "Done",
+            0,
+            0,
+            "Found Raspberry Pi candidate",
+        )
+        return DiscoverySummary(
+            tried_hostnames=hostnames,
+            scanned_networks=[],
+            scanned_hosts=0,
+            results=direct_scored,
+        )
 
-    networks = normalize_networks(args.network)
-    if not networks:
+    _emit_progress(
+        progress_callback,
+        "Detecting networks",
+        0,
+        0,
+        "Detecting local IPv4 networks",
+    )
+    networks = normalize_networks(cli_networks)
+
+    scan_results, scanned_hosts = scan_network(
+        networks,
+        timeout,
+        workers,
+        progress_callback,
+    )
+
+    _emit_progress(
+        progress_callback,
+        "Scoring results",
+        0,
+        0,
+        "Scoring candidates",
+    )
+    all_results = _deduplicate_results([*direct_results, *scan_results])
+    scored = sorted(
+        (score_host(result, target_hostname) for result in all_results),
+        key=lambda item: (item.score, bool(item.host.open_ports), item.host.ip),
+        reverse=True,
+    )
+
+    has_candidate = any(result.score > 0 for result in scored)
+    _emit_progress(
+        progress_callback,
+        "Done",
+        scanned_hosts,
+        scanned_hosts,
+        "Found Raspberry Pi candidate" if has_candidate else "No matching Raspberry Pi found",
+    )
+    return DiscoverySummary(
+        tried_hostnames=hostnames,
+        scanned_networks=networks,
+        scanned_hosts=scanned_hosts,
+        results=scored,
+    )
+
+
+def _emit_progress(
+    progress_callback: Callable[[DiscoveryProgress], None] | None,
+    phase: str,
+    completed: int,
+    total: int,
+    message: str,
+) -> None:
+    if progress_callback is not None:
+        progress_callback(
+            DiscoveryProgress(
+                phase=phase,
+                completed=completed,
+                total=total,
+                message=message,
+            )
+        )
+
+
+def main() -> int:
+    args = parse_args()
+    try:
+        summary = discover(
+            target_hostname=args.hostname,
+            cli_networks=args.network,
+            timeout=args.timeout,
+            workers=args.workers,
+            show_all=args.show_all,
+        )
+    except ValueError as exc:
+        print(f"--{exc}", file=sys.stderr)
+        return 2
+
+    if not summary.scanned_networks and not summary.results:
         print(
             "Could not detect local networks. Try:\n"
             "python discover_pi.py --network 192.168.1.0/24",
@@ -532,15 +663,15 @@ def main() -> int:
         )
         return 2
 
-    scan_results = scan_network(networks, args.timeout, args.workers)
-    all_results = _deduplicate_results([*direct_results, *scan_results])
-    scored = sorted(
-        (score_host(result, args.hostname) for result in all_results),
-        key=lambda item: (item.score, bool(item.host.open_ports), item.host.ip),
-        reverse=True,
+    print(
+        format_results(
+            summary.results,
+            args.hostname,
+            summary.tried_hostnames,
+            summary.scanned_networks,
+            args.show_all,
+        )
     )
-
-    print(format_results(scored, args.hostname, hostnames, networks, args.show_all))
     return 0
 
 
