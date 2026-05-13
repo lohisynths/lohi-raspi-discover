@@ -14,6 +14,21 @@ probe and does not require root or administrator privileges.
 
 ## Install
 
+Create and activate a virtual environment:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+```
+
+On Windows PowerShell, activate it with:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Then install the dependency:
+
 ```bash
 python -m pip install -r requirements.txt
 ```
